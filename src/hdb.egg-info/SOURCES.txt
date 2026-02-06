@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+src/hdb/__init__.py
+src/hdb/__main__.py
+src/hdb/app.py
+src/hdb.egg-info/PKG-INFO
+src/hdb.egg-info/SOURCES.txt
+src/hdb.egg-info/dependency_links.txt
+src/hdb.egg-info/entry_points.txt
+src/hdb.egg-info/top_level.txt

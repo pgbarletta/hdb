@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hdb"
+version = "0.1.0"
+description = "Real-time binary/decimal/hexadecimal GUI converter with power columns."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Codex" }
+]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Utilities"
+]
+
+[project.scripts]
+hdb = "hdb.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
