@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import os
 import signal
 import tkinter as tk
 import tkinter.font as tkfont
 from dataclasses import dataclass
+from tkinter import ttk
+
+from .visualizer import FloatVisualizerFrame, IntegerVisualizerFrame
+
+UI_FONT = ("DejaVu Sans", 13)
+UI_FONT_BOLD = ("DejaVu Sans", 13, "bold")
+PANEL_TITLE_FONT = ("DejaVu Sans", 15, "bold")
+ENTRY_FONT = ("DejaVu Sans Mono", 30, "bold")
+COLUMN_DIGIT_FONT = ("DejaVu Sans Mono", 18, "bold")
+COLUMN_POWER_FONT = ("DejaVu Sans Mono", 10)
+COLUMN_DIGIT_FONT_WIDE = ("DejaVu Sans Mono", 19, "bold")
+COLUMN_POWER_FONT_WIDE = ("DejaVu Sans Mono", 12)
 
 BASES = {
     "bin": 2,
@@ -56,6 +69,30 @@ def format_value(value: int, base: int) -> str:
     return sign + group_from_right(digits, 4)
 
 
+def format_source_text(text: str, base: int) -> str:
+    cleaned = clean_input(text)
+    if cleaned in {"", "+", "-"}:
+        return text
+
+    negative = cleaned.startswith("-")
+    if cleaned[:1] in {"+", "-"}:
+        cleaned = cleaned[1:]
+
+    if not cleaned:
+        cleaned = "0"
+
+    if base == 2:
+        grouped = group_from_right(cleaned, 4)
+    elif base == 10:
+        grouped = group_from_right(cleaned, 3)
+    elif base == 16:
+        grouped = group_from_right(cleaned.upper(), 4)
+    else:
+        raise ValueError(f"Unsupported base: {base}")
+
+    return ("-" if negative else "") + grouped
+
+
 @dataclass
 class BasePanel:
     key: str
@@ -63,9 +100,7 @@ class BasePanel:
     frame: tk.LabelFrame
     entry: tk.Entry
     copy_button: tk.Button
-    entry_scroll: tk.Scrollbar
     canvas: tk.Canvas
-    canvas_scroll: tk.Scrollbar
     _default_bg: str
     _render_cache: tuple[bool, str] | None = None
 
@@ -102,28 +137,28 @@ class BasePanel:
                 anchor="nw",
                 text="Negative value",
                 fill="#aa3333",
-                font=("DejaVu Sans", 10, "bold"),
+                font=UI_FONT_BOLD,
             )
-            y_top = 20
+            y_top = 26
 
         total_digits = len(cleaned)
         if self.base == 2:
-            # Compact binary layout: keeps 32 columns close to half of a 1200px window.
-            col_width = 24
+            # Compact binary layout: keeps 32 columns readable within the wider default window.
+            col_width = 32
             col_gap = 1
-            box_height = 46
-            digit_font = ("DejaVu Sans Mono", 14, "bold")
-            power_font = ("DejaVu Sans Mono", 7)
-            digit_y_offset = 15
-            power_y_offset = 35
+            box_height = 64
+            digit_font = COLUMN_DIGIT_FONT
+            power_font = COLUMN_POWER_FONT
+            digit_y_offset = 21
+            power_y_offset = 49
         else:
-            col_width = 36
+            col_width = 46
             col_gap = 2
-            box_height = 52
-            digit_font = ("DejaVu Sans Mono", 14, "bold")
-            power_font = ("DejaVu Sans Mono", 9)
-            digit_y_offset = 18
-            power_y_offset = 40
+            box_height = 72
+            digit_font = COLUMN_DIGIT_FONT_WIDE
+            power_font = COLUMN_POWER_FONT_WIDE
+            digit_y_offset = 25
+            power_y_offset = 57
 
         max_power = max(0, total_digits - 1)
         widest_power_text = f"{self.base}^{max_power}"
@@ -165,11 +200,15 @@ class BasePanel:
 
 class BaseConverterApp(tk.Tk):
     def __init__(self) -> None:
+        # Disable Tk input methods early to avoid noisy fabricated-key logs on some Linux builds.
+        os.environ.setdefault("TK_NO_INPUT_METHODS", "1")
         super().__init__()
-        self.title("Real-Time Base Converter")
-        self.geometry("1200x860")
-        self.minsize(900, 680)
+        self._disable_input_methods()
+        self.title("hdb Datatype Visualizer")
+        self.geometry("1400x980")
+        self.minsize(1100, 760)
         self.configure(bg="#f5f7fa")
+        self.option_add("*TCombobox*Listbox.font", "DejaVu Sans Mono 13")
 
         self._programmatic = False
         self._history_replaying = False
@@ -186,42 +225,60 @@ class BaseConverterApp(tk.Tk):
         self._wire_events()
         self._install_signal_handlers()
         self._update_from_source("dec")
-        self.after(10, self._focus_binary_entry)
+        self.after(10, lambda: self._select_tab(0))
+
+    def _disable_input_methods(self) -> None:
+        try:
+            self.tk.call("tk", "useinputmethods", False)
+        except tk.TclError:
+            # Not available on all platforms/windowing systems.
+            pass
 
     def _build_ui(self) -> None:
         root = tk.Frame(self, bg="#f5f7fa")
-        root.pack(fill="both", expand=True, padx=16, pady=14)
+        root.pack(fill="both", expand=True, padx=12, pady=10)
 
-        title = tk.Label(
-            root,
-            text="Binary / Decimal / Hexadecimal Converter",
-            bg="#f5f7fa",
-            fg="#1d2a38",
-            font=("DejaVu Sans", 21, "bold"),
+        style = ttk.Style(self)
+        style.configure("Hdb.TNotebook", tabposition="n")
+        style.configure(
+            "Hdb.TNotebook.Tab",
+            font=("DejaVu Sans", 10, "bold"),
+            padding=(8, 4),
+            anchor="w",
         )
-        title.pack(anchor="w")
 
-        subtitle = tk.Label(
-            root,
-            text="Supports very large integers. Each column shows the positional power for that base.",
-            bg="#f5f7fa",
-            fg="#4a6178",
-            font=("DejaVu Sans", 11),
-        )
-        subtitle.pack(anchor="w", pady=(2, 10))
+        self.notebook = ttk.Notebook(root, style="Hdb.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
 
+        converter_tab = tk.Frame(self.notebook, bg="#f5f7fa")
+        integer_tab = tk.Frame(self.notebook, bg="#f5f7fa")
+        float_tab = tk.Frame(self.notebook, bg="#f5f7fa")
+
+        self.notebook.add(converter_tab, text="Base Converter")
+        self.notebook.add(integer_tab, text="Integer Visualizer")
+        self.notebook.add(float_tab, text="Float Visualizer")
+
+        self._build_converter_tab(converter_tab)
+
+        self.integer_visualizer = IntegerVisualizerFrame(integer_tab)
+        self.integer_visualizer.pack(fill="both", expand=True)
+
+        self.float_visualizer = FloatVisualizerFrame(float_tab)
+        self.float_visualizer.pack(fill="both", expand=True)
+
+    def _build_converter_tab(self, parent: tk.Widget) -> None:
         for key in ("bin", "dec", "hex"):
-            panel = self._build_panel(root, key)
+            panel = self._build_panel(parent, key)
             panel.frame.pack(fill="x", pady=8)
             self.panels[key] = panel
 
         status_bar = tk.Label(
-            root,
+            parent,
             textvariable=self.status_var,
             bg="#f5f7fa",
             fg="#3f5368",
             anchor="w",
-            font=("DejaVu Sans", 10),
+            font=UI_FONT,
         )
         status_bar.pack(fill="x", pady=(8, 0))
 
@@ -229,7 +286,7 @@ class BaseConverterApp(tk.Tk):
         frame = tk.LabelFrame(
             parent,
             text=TITLES[key],
-            font=("DejaVu Sans", 12, "bold"),
+            font=PANEL_TITLE_FONT,
             bg="#ffffff",
             fg="#22313f",
             bd=1,
@@ -244,12 +301,12 @@ class BaseConverterApp(tk.Tk):
         entry = tk.Entry(
             entry_row,
             textvariable=self.vars[key],
-            font=("DejaVu Sans Mono", 24, "bold"),
+            font=ENTRY_FONT,
             bd=1,
             relief="solid",
             highlightthickness=1,
             highlightbackground="#b8b8b8",
-            insertwidth=3,
+            insertwidth=4,
         )
         entry.pack(side="left", fill="x", expand=True)
 
@@ -257,9 +314,9 @@ class BaseConverterApp(tk.Tk):
             entry_row,
             text="Copy",
             command=lambda entry_key=key: self._copy_value(entry_key),
-            font=("DejaVu Sans", 10, "bold"),
-            padx=12,
-            pady=8,
+            font=UI_FONT_BOLD,
+            padx=14,
+            pady=10,
             bd=1,
             relief="solid",
             highlightthickness=0,
@@ -268,16 +325,10 @@ class BaseConverterApp(tk.Tk):
         )
         copy_button.pack(side="left", padx=(8, 0))
 
-        entry_scroll = tk.Scrollbar(
-            frame, orient="horizontal", command=entry.xview, takefocus=False
-        )
-        entry.configure(xscrollcommand=entry_scroll.set)
-        entry_scroll.pack(fill="x", pady=(2, 8))
-
         canvas = tk.Canvas(
             frame,
             bg="#fcfdff",
-            height=58,
+            height=76,
             bd=1,
             relief="solid",
             highlightthickness=0,
@@ -285,24 +336,13 @@ class BaseConverterApp(tk.Tk):
         )
         canvas.pack(fill="x")
 
-        canvas_scroll = tk.Scrollbar(
-            frame,
-            orient="horizontal",
-            command=canvas.xview,
-            takefocus=False,
-        )
-        canvas.configure(xscrollcommand=canvas_scroll.set)
-        canvas_scroll.pack(fill="x", pady=(2, 0))
-
         return BasePanel(
             key=key,
             base=BASES[key],
             frame=frame,
             entry=entry,
             copy_button=copy_button,
-            entry_scroll=entry_scroll,
             canvas=canvas,
-            canvas_scroll=canvas_scroll,
             _default_bg=entry.cget("bg"),
         )
 
@@ -325,6 +365,19 @@ class BaseConverterApp(tk.Tk):
         self.bind_all("<Shift-Tab>", self._on_shift_tab_key, add=True)
         self.bind_all("<ISO_Left_Tab>", self._on_shift_tab_key, add=True)
         self.bind_all("<Escape>", self._on_escape_quit, add=True)
+        self.bind_all("<Control-Key-1>", self._on_ctrl_1_tab, add=True)
+        self.bind_all("<Control-Key-2>", self._on_ctrl_2_tab, add=True)
+        self.bind_all("<Control-Key-3>", self._on_ctrl_3_tab, add=True)
+        self._bind_escape_on_inputs()
+
+    def _bind_escape_on_inputs(self) -> None:
+        def _attach(widget: tk.Widget) -> None:
+            if isinstance(widget, (tk.Entry, ttk.Combobox, tk.Text, tk.Spinbox)):
+                widget.bind("<Escape>", self._on_escape_quit, add=True)
+            for child in widget.winfo_children():
+                _attach(child)
+
+        _attach(self)
 
     def _install_signal_handlers(self) -> None:
         def _on_sigint(_signum: int, _frame: object) -> None:
@@ -342,11 +395,11 @@ class BaseConverterApp(tk.Tk):
     def _make_focus_out_handler(self, key: str):
         def _handler(_event) -> None:
             try:
-                value = parse_value(self.vars[key].get(), BASES[key])
+                parse_value(self.vars[key].get(), BASES[key])
             except ValueError:
                 return
             self._programmatic = True
-            self.vars[key].set(format_value(value, BASES[key]))
+            self.vars[key].set(format_source_text(self.vars[key].get(), BASES[key]))
             self._programmatic = False
             self._update_from_source(key)
 
@@ -430,10 +483,13 @@ class BaseConverterApp(tk.Tk):
         entry.selection_range(0, tk.END)
         entry.icursor(tk.END)
 
-    def _focus_entry_by_key(self, key: str) -> None:
+    def _focus_entry_by_key(self, key: str, *, select_text: bool = True) -> None:
         entry = self.panels[key].entry
         entry.focus_set()
-        entry.selection_range(0, tk.END)
+        if select_text:
+            entry.selection_range(0, tk.END)
+        else:
+            entry.selection_clear()
         entry.icursor(tk.END)
 
     def _entry_key_from_widget(self, widget: object) -> str | None:
@@ -469,20 +525,55 @@ class BaseConverterApp(tk.Tk):
             focused_key = self._entry_key_from_widget(focused_widget)
         if focused_key is None:
             target_key = self.entry_order[-1] if reverse else self.entry_order[0]
-            self._focus_entry_by_key(target_key)
+            self._focus_entry_by_key(target_key, select_text=False)
             return "break"
 
         current_index = self.entry_order.index(focused_key)
         step = -1 if reverse else 1
         next_index = (current_index + step) % len(self.entry_order)
-        self._focus_entry_by_key(self.entry_order[next_index])
+        self._focus_entry_by_key(self.entry_order[next_index], select_text=False)
         return "break"
 
-    def _on_tab_key(self, event: tk.Event) -> str:
-        return self._cycle_entry_focus(reverse=False, widget=event.widget)
+    def _current_tab_index(self) -> int:
+        selected = self.notebook.select()
+        if not selected:
+            return 0
+        return int(self.notebook.index(selected))
 
-    def _on_shift_tab_key(self, event: tk.Event) -> str:
-        return self._cycle_entry_focus(reverse=True, widget=event.widget)
+    def _select_tab(self, index: int) -> None:
+        self.notebook.select(index)
+        if index == 0:
+            self._focus_binary_entry()
+            return
+        if index == 1:
+            self.integer_visualizer.focus_primary_input()
+            return
+        if index == 2:
+            self.float_visualizer.focus_primary_input()
+
+    def _on_ctrl_1_tab(self, _event: tk.Event) -> str:
+        self._select_tab(0)
+        return "break"
+
+    def _on_ctrl_2_tab(self, _event: tk.Event) -> str:
+        self._select_tab(1)
+        return "break"
+
+    def _on_ctrl_3_tab(self, _event: tk.Event) -> str:
+        self._select_tab(2)
+        return "break"
+
+    def _on_tab_key(self, event: tk.Event) -> str | None:
+        tab_index = self._current_tab_index()
+        if tab_index == 0:
+            return self._cycle_entry_focus(reverse=False, widget=event.widget)
+        return None
+
+    def _on_shift_tab_key(self, event: tk.Event) -> str | None:
+        tab_index = self._current_tab_index()
+        if tab_index == 0:
+            return self._cycle_entry_focus(reverse=True, widget=event.widget)
+        return None
 
     def _on_escape_quit(self, _event: tk.Event) -> str:
         self._quit_app()
@@ -501,7 +592,7 @@ class BaseConverterApp(tk.Tk):
         self.status_var.set("Real-time conversion active.")
 
         formatted = {key: format_value(value, base) for key, base in BASES.items()}
-        source_formatted = formatted[source_key]
+        source_formatted = format_source_text(source_text, BASES[source_key])
 
         source_clean = clean_input(source_text)
         should_reformat_source = (
@@ -510,9 +601,11 @@ class BaseConverterApp(tk.Tk):
         )
         source_cursor_index = 0
         source_logical_count = 0
+        source_cursor_at_end = False
         source_entry = self.panels[source_key].entry
         if should_reformat_source:
             source_cursor_index = source_entry.index(tk.INSERT)
+            source_cursor_at_end = source_cursor_index == len(source_text)
             source_logical_count = self._logical_char_count(source_text, source_cursor_index)
 
         self._programmatic = True
@@ -523,15 +616,29 @@ class BaseConverterApp(tk.Tk):
             self.vars[source_key].set(source_formatted)
         self._programmatic = False
         if should_reformat_source:
-            new_cursor_index = self._cursor_index_from_logical_count(
-                source_formatted, source_logical_count
-            )
-            source_entry.icursor(new_cursor_index)
+            if source_cursor_at_end:
+                new_cursor_index = len(source_formatted)
+            else:
+                new_cursor_index = self._cursor_index_from_logical_count(
+                    source_formatted, source_logical_count
+                )
+            expected_text = source_formatted
+
+            def _restore_cursor() -> None:
+                if not source_entry.winfo_exists():
+                    return
+                if self.vars[source_key].get() != expected_text:
+                    return
+                source_entry.icursor(new_cursor_index)
+
+            self.after_idle(_restore_cursor)
 
         self._push_history(source_key, self.vars[source_key].get())
 
+        render_text = dict(formatted)
+        render_text[source_key] = source_formatted
         for key, panel in self.panels.items():
-            panel.update_columns(formatted[key])
+            panel.update_columns(render_text[key])
 
     def _mark_invalid(self, source_key: str, current_text: str) -> None:
         for key, panel in self.panels.items():

@@ -1,2 +1,0 @@
-[console_scripts]
-hdb = hdb.app:main
