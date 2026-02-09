@@ -1,0 +1,47 @@
+flowchart TD
+    K[Key pressed] --> G{Global shortcut?}
+
+    G -->|Ctrl+1| T1[_on_ctrl_1_tab -> _select_tab(0)]
+    G -->|Ctrl+2| T2[_on_ctrl_2_tab -> _select_tab(1)]
+    G -->|Ctrl+3| T3[_on_ctrl_3_tab -> _select_tab(2)]
+    G -->|Escape| Q[_on_escape_quit -> _quit_app]
+    K --> EIW[Escape on input widgets]
+    EIW --> Q
+
+    K --> TAB[Tab]
+    TAB --> TABCHK{Base tab active?}
+    TABCHK -->|Yes| CF1[_on_tab_key -> _cycle_entry_focus(reverse=False)]
+    TABCHK -->|No| DEF1[Default widget tab behavior]
+    K --> FTAB[Tab on float entry widget]
+    FTAB --> CFW1[widget-level cycle_entry_focus (no text selection)]
+
+    K --> STAB[Shift+Tab / ISO_Left_Tab]
+    STAB --> STABCHK{Base tab active?}
+    STABCHK -->|Yes| CF2[_on_shift_tab_key -> _cycle_entry_focus(reverse=True)]
+    STABCHK -->|No| DEF2[Default widget shift-tab behavior]
+    K --> FSTAB[Shift+Tab on float entry widget]
+    FSTAB --> CFW2[widget-level cycle_entry_focus reverse (no text selection)]
+
+    K --> CU[Ctrl+U in base entry]
+    CU --> DEL[_on_ctrl_u_key delete(0, cursor)]
+    K --> CUV[Ctrl+U in visualizer decimal input]
+    CUV --> DELV[_on_ctrl_u_key delete(0, cursor)]
+    DELV --> FUPD[debounced float refresh (30ms)]
+
+    K --> FBIT[0/1 in float field]
+    FBIT --> BEDIT[_on_panel_bit_fields_edit -> sync all float formats]
+    K --> FDEL[Backspace/Delete in float field]
+    FDEL --> FZERO[Replace target bit with 0 (no deletion)]
+    FZERO --> BEDIT
+
+    K --> CZ[Ctrl+Z in base entry]
+    CZ --> UNDO[_on_ctrl_z_key -> _history_step(step=-1)]
+
+    K --> CSZ[Ctrl+Shift+Z in base entry]
+    CSZ --> REDO[_on_ctrl_shift_z_key -> _history_step(step=+1)]
+
+    K --> CPY1[KeyPress C in base entry]
+    CPY1 --> COPY[_make_copy_key_handler -> _copy_value]
+
+    K --> CPY2[Ctrl+C in base entry]
+    CPY2 --> COPY

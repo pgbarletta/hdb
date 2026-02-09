@@ -1,0 +1,47 @@
+sequenceDiagram
+    participant User
+    participant App as BaseConverterApp
+    participant Tab as Notebook Tab
+    participant Base as Base Converter
+    participant Int as Integer Visualizer
+    participant Flt as Float Visualizer
+    participant Worker as Float Worker Thread
+    participant Half as Half Panel
+    participant Single as Single Panel
+    participant Double as Double Panel
+
+    User->>App: Ctrl+1 / Ctrl+2 / Ctrl+3
+    App->>Tab: _select_tab(index)
+
+    alt Base Converter active
+        User->>Base: Edit binary/decimal/hex entry
+        Base->>App: StringVar trace
+        App->>App: _update_from_source(source)
+        App->>App: parse_value + format_value
+        App->>Base: Update other fields + panel columns
+        App->>Base: Push history + status
+    else Integer Visualizer active
+        User->>Int: Edit decimal input / type
+        Int->>Int: parse_decimal_input
+        Int->>Int: int_wrap_and_flags + int_bits
+        Int->>Int: Render bit boxes, signed/unsigned views
+        Int->>Int: Highlight wrapped result on overflow
+    else Float Visualizer active
+        User->>Flt: Edit shared decimal input
+        Flt->>Flt: parse + debounce(30ms) + request_id++
+        Flt->>Worker: build_all_float_panel_display_data(value)
+        Worker-->>Flt: panel display data (async)
+        alt stale request_id
+            Flt->>Flt: drop result
+            Flt->>Flt: print stale timing to stdout
+        else latest request_id
+            Flt->>Half: apply_display_data(...)
+            Flt->>Single: apply_display_data(...)
+            Flt->>Double: apply_display_data(...)
+            Flt->>Flt: update sign/exponent/mantissa fields
+            Flt->>Flt: print debounce/compute/queue/apply/total ms
+        end
+        User->>Flt: Edit float panel sign/exponent/mantissa fields
+        Flt->>Flt: decode source format bit fields
+        Flt->>Flt: synchronize decimal + half + single + double
+    end

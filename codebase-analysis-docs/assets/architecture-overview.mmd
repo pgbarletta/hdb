@@ -1,0 +1,58 @@
+flowchart TD
+    U[User Keyboard / Buttons] --> APP[BaseConverterApp]
+    APP --> IME[Disable Tk input methods]
+    APP --> TYPO[Scaled UI typography]
+    APP --> NB[ttk.Notebook tabs]
+
+    NB --> TAB1[Base Converter tab]
+    NB --> TAB2[Integer Visualizer tab]
+    NB --> TAB3[Float Visualizer tab]
+
+    TAB1 --> E[tk.Entry events + StringVar traces]
+    E --> UF[_update_from_source(source_key)]
+    UF --> P[parse_value + clean_input]
+    P -->|valid| F[format_value per base]
+    F --> S[Set non-source StringVars]
+    S --> C[BasePanel.update_columns x3]
+    UF --> H[_push_history]
+    UF --> ST1[base status updates]
+    P -->|ValueError| INV[_mark_invalid + status error + history push]
+
+    TAB2 --> IV[IntegerVisualizerFrame]
+    IV --> D1[parse_decimal_input]
+    D1 --> IW[int_wrap_and_flags + int_bits]
+    IW --> BG1[BitGrid boxed bits]
+    IW --> ST2[overflow/wrap status]
+
+    TAB3 --> FROOT[FloatVisualizerFrame shared decimal input]
+    FROOT --> D2[parse_decimal_input]
+    D2 --> DEB[after debounce 30ms]
+    DEB --> TH[ThreadPoolExecutor worker]
+    TH --> BLD[build_all_float_panel_display_data]
+    BLD --> APPLY[main-thread apply if request_id is latest]
+    FROOT --> LYT[Float layout: top row half+single, bottom row double]
+    APPLY --> LOG[[stdout timing logs]]
+    APPLY --> HLF[FloatResultPanel half]
+    APPLY --> SGL[FloatResultPanel single]
+    APPLY --> DBL[FloatResultPanel double]
+    LYT --> HLF
+    LYT --> SGL
+    LYT --> DBL
+    HLF --> BEDIT[Editable sign/exp/mant fields]
+    SGL --> BEDIT
+    DBL --> BEDIT
+    BEDIT --> SYNCF[Sync half/single/double + decimal]
+
+    SIG[SIGINT handler] --> Q[_quit_app]
+    ESC[Escape key] --> Q
+
+    K[Ctrl+1/2/3] --> SEL[_select_tab(index)]
+    SEL --> NB
+
+    subgraph Entry points
+      M1[project script: hdb -> hdb.app:main]
+      M2[python -m hdb -> hdb.__main__:main]
+      M1 --> MAIN[main()]
+      M2 --> MAIN
+      MAIN --> APP
+    end
