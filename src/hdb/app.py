@@ -7,7 +7,11 @@ import tkinter.font as tkfont
 from dataclasses import dataclass
 from tkinter import ttk
 
-from .visualizer import FloatVisualizerFrame, IntegerVisualizerFrame
+from .visualizer import (
+    FloatVisualizerFrame,
+    IntegerVisualizerFrame,
+    WarpCalculatorFrame,
+)
 
 UI_FONT = ("DejaVu Sans", 13)
 UI_FONT_BOLD = ("DejaVu Sans", 13, "bold")
@@ -251,14 +255,19 @@ class BaseConverterApp(tk.Tk):
         self.notebook.pack(fill="both", expand=True)
 
         converter_tab = tk.Frame(self.notebook, bg="#f5f7fa")
+        warp_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         integer_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         float_tab = tk.Frame(self.notebook, bg="#f5f7fa")
 
         self.notebook.add(converter_tab, text="Base Converter")
+        self.notebook.add(warp_tab, text="Warp Calculator")
         self.notebook.add(integer_tab, text="Integer Visualizer")
         self.notebook.add(float_tab, text="Float Visualizer")
 
         self._build_converter_tab(converter_tab)
+
+        self.warp_calculator = WarpCalculatorFrame(warp_tab)
+        self.warp_calculator.pack(fill="both", expand=True)
 
         self.integer_visualizer = IntegerVisualizerFrame(integer_tab)
         self.integer_visualizer.pack(fill="both", expand=True)
@@ -364,11 +373,47 @@ class BaseConverterApp(tk.Tk):
         self.bind_all("<Tab>", self._on_tab_key, add=True)
         self.bind_all("<Shift-Tab>", self._on_shift_tab_key, add=True)
         self.bind_all("<ISO_Left_Tab>", self._on_shift_tab_key, add=True)
+        # Bound on the toplevel tag, not "all": Tk consumes Control-Tab before
+        # the "all" bindtag (reserved for its own traversal), but the toplevel
+        # tag still receives it and is in every child widget's bindtags.
+        self.bind("<Control-Tab>", self._on_ctrl_tab_next, add=True)
+        self.bind("<Control-Shift-Tab>", self._on_ctrl_tab_prev, add=True)
+        self.bind("<Control-ISO_Left_Tab>", self._on_ctrl_tab_prev, add=True)
         self.bind_all("<Escape>", self._on_escape_quit, add=True)
         self.bind_all("<Control-Key-1>", self._on_ctrl_1_tab, add=True)
         self.bind_all("<Control-Key-2>", self._on_ctrl_2_tab, add=True)
         self.bind_all("<Control-Key-3>", self._on_ctrl_3_tab, add=True)
+        self.bind_all("<Control-Key-4>", self._on_ctrl_4_tab, add=True)
         self._bind_escape_on_inputs()
+        self._bind_select_all_shortcut()
+
+    def _bind_select_all_shortcut(self) -> None:
+        """Make Ctrl+A select-all in every text input (class-level, so it also
+        covers entries rebuilt later, e.g. warp operand editors on width cycle)."""
+
+        def _select_all_entry(event: tk.Event) -> str:
+            widget = event.widget
+            try:
+                widget.selection_range(0, tk.END)
+                widget.icursor(tk.END)
+            except tk.TclError:
+                pass
+            return "break"
+
+        def _select_all_text(event: tk.Event) -> str:
+            widget = event.widget
+            try:
+                widget.tag_add("sel", "1.0", "end-1c")
+                widget.mark_set("insert", "end-1c")
+            except tk.TclError:
+                pass
+            return "break"
+
+        for widget_class in ("Entry", "Spinbox", "TEntry", "TCombobox", "TSpinbox"):
+            self.bind_class(widget_class, "<Control-a>", _select_all_entry)
+            self.bind_class(widget_class, "<Control-A>", _select_all_entry)
+        self.bind_class("Text", "<Control-a>", _select_all_text)
+        self.bind_class("Text", "<Control-A>", _select_all_text)
 
     def _bind_escape_on_inputs(self) -> None:
         def _attach(widget: tk.Widget) -> None:
@@ -384,6 +429,14 @@ class BaseConverterApp(tk.Tk):
             self.after(0, self._quit_app)
 
         signal.signal(signal.SIGINT, _on_sigint)
+        # Tk's mainloop blocks in C and only runs Python signal handlers when
+        # an event wakes it, so a terminal Ctrl+C would sit unhandled until
+        # the window saw input. Tick regularly so SIGINT quits promptly.
+        self._sigint_tick_id: str | None = None
+        self._sigint_tick()
+
+    def _sigint_tick(self) -> None:
+        self._sigint_tick_id = self.after(50, self._sigint_tick)
 
     def _make_change_handler(self, key: str):
         def _handler(*_args) -> None:
@@ -466,6 +519,12 @@ class BaseConverterApp(tk.Tk):
         self.panels[key].entry.icursor(tk.END)
 
     def _quit_app(self) -> None:
+        if self._sigint_tick_id is not None:
+            try:
+                self.after_cancel(self._sigint_tick_id)
+            except tk.TclError:
+                pass
+            self._sigint_tick_id = None
         self.quit()
         self.destroy()
 
@@ -546,9 +605,12 @@ class BaseConverterApp(tk.Tk):
             self._focus_binary_entry()
             return
         if index == 1:
-            self.integer_visualizer.focus_primary_input()
+            self.warp_calculator.focus_primary_input()
             return
         if index == 2:
+            self.integer_visualizer.focus_primary_input()
+            return
+        if index == 3:
             self.float_visualizer.focus_primary_input()
 
     def _on_ctrl_1_tab(self, _event: tk.Event) -> str:
@@ -563,13 +625,31 @@ class BaseConverterApp(tk.Tk):
         self._select_tab(2)
         return "break"
 
+    def _on_ctrl_4_tab(self, _event: tk.Event) -> str:
+        self._select_tab(3)
+        return "break"
+
+    def _on_ctrl_tab_next(self, _event: tk.Event) -> str:
+        count = self.notebook.index("end")
+        self._select_tab((self._current_tab_index() + 1) % count)
+        return "break"
+
+    def _on_ctrl_tab_prev(self, _event: tk.Event) -> str:
+        count = self.notebook.index("end")
+        self._select_tab((self._current_tab_index() - 1) % count)
+        return "break"
+
     def _on_tab_key(self, event: tk.Event) -> str | None:
+        if event.state & 0x4:  # Ctrl+Tab cycles notebook tabs, not entries
+            return None
         tab_index = self._current_tab_index()
         if tab_index == 0:
             return self._cycle_entry_focus(reverse=False, widget=event.widget)
         return None
 
     def _on_shift_tab_key(self, event: tk.Event) -> str | None:
+        if event.state & 0x4:
+            return None
         tab_index = self._current_tab_index()
         if tab_index == 0:
             return self._cycle_entry_focus(reverse=True, widget=event.widget)

@@ -1,8 +1,9 @@
 # hdb
 
-`hdb` is a Tkinter desktop tool with three synchronized calculator/visualizer tabs:
+`hdb` is a Tkinter desktop tool with four synchronized calculator/visualizer tabs:
 
 - `Base Converter`: Binary (base 2), Decimal (base 10), Hexadecimal (base 16)
+- `Warp Calculator`: Fixed-width bitwise operations and CUDA launch thread visualizer
 - `Integer Visualizer`: C++ integer bit-layout and wrap behavior
 - `Float Visualizer`: IEEE-754 half/single/double decomposition
 
@@ -32,14 +33,21 @@ python -m hdb
 ## Keyboard shortcuts
 
 - `Ctrl+1`: switch to `Base Converter`
-- `Ctrl+2`: switch to `Integer Visualizer`
-- `Ctrl+3`: switch to `Float Visualizer`
+- `Ctrl+2`: switch to `Warp Calculator`
+- `Ctrl+3`: switch to `Integer Visualizer`
+- `Ctrl+4`: switch to `Float Visualizer`
+- `Ctrl+A`: select all text in any text input (Entry, Spinbox, Combobox, Text widgets)
+- `Ctrl+Tab` / `Ctrl+Shift+Tab`: cycle to the next / previous tab (wraps around), always — even when the cursor is inside a text box
 - `Tab` / `Shift+Tab`:
   - on `Base Converter`: cycle base text boxes
+  - on `Warp Calculator`: default widget tab behavior
   - on `Float Visualizer`: cycle editable float text boxes (decimal + sign/exponent/mantissa) without auto-selecting text
+- `Ctrl+C`: copy selected text (native copy in plain entries; native copy in fixed-width bit editors)
+- `Ctrl+X`: cut (plain entries: native delete selection; fixed-width bit editors: copy selection to clipboard and zero the bits)
 - `Ctrl+U` in a base-converter textbox or visualizer decimal input: delete left of cursor
 - `Ctrl+Z` / `Ctrl+Shift+Z` in a base-converter textbox: undo / redo
 - `Esc`: always quit (works even when focus is inside a textbox)
+- `Ctrl+C` in the launching terminal (SIGINT): quits promptly, even when the window is idle
 
 ## Base converter behavior
 
@@ -48,6 +56,40 @@ python -m hdb
 - Leading zeros are preserved in the field you are actively editing.
 - Binary and hexadecimal are grouped with `_` every 4 digits.
 - Each base panel includes positional power columns (`base^n`).
+
+## Warp calculator behavior
+
+**Binary Calculator:**
+- Fixed-width operand editors for A and B, displayed as binary strings with red per-bit index guides.
+- Keystroke semantics match float bit fields: `0/1` replace at cursor; typing at end appends with left-shift; `Backspace`/`Delete` write `0`.
+- Unary `~` (NOT) button inverts each operand in place.
+- Bitwise operations: `AND`, `OR`, `XOR`, `SHL` (shift left), `SHR` (logical shift right).
+- Width cycle button rolls through `4 → WARP(5) → 8 → 16 → 32 → 4`, re-sanitizing operands and result (widening zero-pads high bits; narrowing keeps low bits).
+- Results displayed in copyable rows: fixed-width binary and hexadecimal.
+- When SHL drops set bits beyond the width window, status notes the dropped carry-out.
+- Shift count B is the unsigned value of B masked to the current width; shift ≥ width yields 0.
+
+**CUDA Thread Visualizer:**
+- Launch configuration input: `<<<blocks, (x, y, z)>>>` with four decimal entry fields for block count and 3D blockDim.
+- Constraints (with caps and status message on exceed):
+  - `blocks ≤ 32`
+  - `blockDim.x * blockDim.y * blockDim.z ≤ 1024` (CUDA threads/block limit)
+  - total threads (blocks × block_size) ≤ 4096
+- Threads decomposed using CUDA linearization: `linear = threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y`.
+- Canvas draws one block per section (labeled `Block 0`, `Block 1`, etc.).
+- Within each block, warps are drawn as vertical columns side by side.
+- Each warp column has a label at the top (`w0`, `w1`, etc.) and always contains 32 lane squares stacked vertically (0–31).
+- Row-per-warp visualization model: each `(y, z)` row of `blockDim.x` threads occupies its own warp(s) (`ceil(blockDim.x / 32)` warps per row). When `blockDim.x` is not a multiple of 32, the leftover lanes of each row's last warp are drawn grayed out and are not clickable — e.g. `blockDim (16, 1, 16)` draws 16 warps with lanes 16–31 gray in every warp.
+- Note: this is a deliberate visualization model; real CUDA hardware packs warps from consecutive linear thread ids without per-dimension padding.
+- The status line reports active threads, warps per block, total lanes, and unused lanes.
+- Color coding: each thread square's background is colored by its `threadIdx.y` index (0 = blue, 1 = green, 2 = amber, 3 = violet, 4 = teal, 5 = rose, cycling); each warp column sits on a background rectangle colored by its `threadIdx.z` index with the same palette. Colors are rendered with a simulated transparency (blended toward the white backdrop; squares ~35% opacity, column rectangles ~16%). Gray is reserved for unused lanes.
+- Each thread displayed as a clickable square labeled with its lane index (0–31 within the warp).
+- The grid drawer occupies the left half of the section; a permanently visible "Thread info" panel occupies the right half.
+- The info panel always shows the full text skeleton — `blockIdx.x`, `threadIdx.x`, `threadIdx.y`, `threadIdx.z`, and the fully expanded global index calculation `blockIdx.x*blockDim.x*blockDim.y*blockDim.z + threadIdx.z*blockDim.x*blockDim.y + threadIdx.y*blockDim.x + threadIdx.x` — with `-` placeholders when no thread is selected.
+- Clicking a thread square highlights it and fills the info panel with that thread's numbers (every multiplier substituted).
+- Clicking the highlighted thread again deselects it (numbers revert to placeholders); only one thread is highlighted at a time; changing the launch config clears the selection.
+- Canvas scrolls vertically only; no horizontal scrollbar widget (by repo convention).
+- Scrolling: the mouse wheel scrolls the grid when the pointer is over it; `Page Up`/`Page Down` scroll it by pages whenever the Warp Calculator tab is visible (including while typing in the operand or launch-config entries).
 
 ## Integer visualizer behavior
 

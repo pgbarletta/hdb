@@ -12,12 +12,17 @@ from typing import Any, Callable
 from .datatypes import (
     FLOAT_TYPE_SPECS,
     INT_TYPE_SPECS,
+    WARP_WIDTHS,
     FloatTypeSpec,
+    bits_invert,
     build_all_float_panel_display_data,
+    cuda_thread_info,
     float_fields_from_bit_text,
     int_bits,
     int_wrap_and_flags,
     parse_decimal_input,
+    warp_apply_op,
+    warp_width_label,
 )
 
 UI_FONT = ("DejaVu Sans", 13)
@@ -341,6 +346,91 @@ def _make_copyable_entry(
     )
     entry.configure(state="readonly")
     return entry
+
+
+def sanitize_bits(text: str, bit_count: int) -> str:
+    """Filter to ``0``/``1`` chars and pad/truncate to a fixed width."""
+    filtered = "".join(ch for ch in text if ch in {"0", "1"})
+    if len(filtered) >= bit_count:
+        return filtered[:bit_count]
+    return filtered + ("0" * (bit_count - len(filtered)))
+
+
+def insert_at_end_with_left_shift(bits: str, incoming_bit: str) -> str:
+    """Append a bit at the low end, shifting existing bits left (fixed width)."""
+    if not bits:
+        return incoming_bit
+    return bits[1:] + incoming_bit
+
+
+def entry_selection_bounds(entry: tk.Entry) -> tuple[int, int] | None:
+    """Return (first, last) of the entry's selection, or None if nothing is selected."""
+    try:
+        if entry.selection_present():
+            return int(entry.index("sel.first")), int(entry.index("sel.last"))
+    except tk.TclError:
+        pass
+    return None
+
+
+def zero_bits_range(bits: str, first: int, last: int) -> str:
+    """Overwrite ``bits[first:last]`` with zeros (fixed width preserved)."""
+    return bits[:first] + "0" * (last - first) + bits[last:]
+
+
+def bit_index_tokens(bit_count: int, width: int = 2) -> list[str]:
+    """Right-aligned descending bit-index labels (e.g. ``[' 3', ' 2', ' 1', ' 0']``)."""
+    if bit_count <= 0:
+        return []
+    token_width = max(1, width)
+    return [f"{idx:>{token_width}d}" for idx in range(bit_count - 1, -1, -1)]
+
+
+def build_bit_index_guides(parent: tk.Widget, bit_count: int) -> list[tk.Canvas]:
+    """Create the red per-bit index guide canvas beneath a bit editor."""
+    if bit_count <= 0:
+        return []
+    canvas = tk.Canvas(
+        parent,
+        bg="#ffffff",
+        bd=0,
+        highlightthickness=0,
+        height=BIT_INDEX_ROW_HEIGHT,
+    )
+    canvas.pack(side="top", fill="x", anchor="w")
+    return [canvas]
+
+
+def bind_bit_index_guides(
+    entry: tk.Entry,
+    canvases: list[tk.Canvas],
+    bit_count: int,
+) -> None:
+    """Render/align the red bit-index tokens under a fixed-width bit editor."""
+    if bit_count <= 0 or not canvases:
+        return
+    tokens = bit_index_tokens(bit_count, width=2)
+    bit_font = tkfont.Font(font=BIT_FIELD_FONT)
+    min_width = max(1, bit_font.measure("0") * bit_count)
+    canvas = canvases[0]
+
+    def _render(_event: tk.Event | None = None) -> None:
+        width = max(entry.winfo_width(), min_width)
+        cell_width = width / bit_count
+        canvas.configure(width=width)
+        canvas.delete("all")
+        for col, token in enumerate(tokens):
+            x = (col + 0.5) * cell_width
+            canvas.create_text(
+                x,
+                BIT_INDEX_ROW_HEIGHT / 2,
+                text=token,
+                fill="#c0392b",
+                font=BIT_INDEX_FONT,
+            )
+
+    entry.bind("<Configure>", _render, add=True)
+    entry.after_idle(_render)
 
 
 class IntegerVisualizerFrame(tk.Frame):
@@ -882,10 +972,14 @@ class FloatVisualizerFrame(tk.Frame):
             entry.bind("<Shift-Tab>", self._on_entry_shift_tab, add=True)
             entry.bind("<ISO_Left_Tab>", self._on_entry_shift_tab, add=True)
 
-    def _on_entry_tab(self, event: tk.Event) -> str:
+    def _on_entry_tab(self, event: tk.Event) -> str | None:
+        if event.state & 0x4:  # Ctrl+Tab cycles notebook tabs, not entries
+            return None
         return self.cycle_entry_focus(reverse=False, widget=event.widget)
 
-    def _on_entry_shift_tab(self, event: tk.Event) -> str:
+    def _on_entry_shift_tab(self, event: tk.Event) -> str | None:
+        if event.state & 0x4:
+            return None
         return self.cycle_entry_focus(reverse=True, widget=event.widget)
 
     @staticmethod
@@ -1093,13 +1187,33 @@ class FloatResultPanel(tk.LabelFrame):
             bit_index = max(0, min(bit_index, bit_count - 1))
             variable.set(bits[:bit_index] + replacement + bits[bit_index + 1 :])
 
+        def _zero_selection(first: int, last: int) -> None:
+            bits = self._sanitize_bits(variable.get(), bit_count)
+            variable.set(zero_bits_range(bits, first, last))
+            entry.selection_clear()
+            entry.icursor(first)
+
         def _on_keypress(event: tk.Event) -> str | None:
-            if event.keysym in {"Tab", "ISO_Left_Tab", "Left", "Right", "Home", "End"}:
+            if event.keysym in {"Tab", "ISO_Left_Tab", "Left", "Right", "Home", "End", "Prior", "Next"}:
                 return None
 
-            # Keep clipboard shortcuts working.
+            selection = entry_selection_bounds(entry)
+
+            # Keep clipboard shortcuts working, but Cut must preserve fixed width:
+            # copy the selection ourselves and zero it instead of deleting chars.
             if event.state & 0x4:
+                if event.keysym.lower() == "x" and selection is not None:
+                    first, last = selection
+                    bits = self._sanitize_bits(variable.get(), bit_count)
+                    entry.clipboard_clear()
+                    entry.clipboard_append(bits[first:last])
+                    _zero_selection(first, last)
+                    return "break"
                 return None
+
+            if event.keysym in {"BackSpace", "Delete"} and selection is not None:
+                _zero_selection(*selection)
+                return "break"
 
             cursor = entry.index(tk.INSERT)
             if event.char in {"0", "1"}:
@@ -1137,34 +1251,12 @@ class FloatResultPanel(tk.LabelFrame):
         ]
         return [entry for entry in entries if isinstance(entry, tk.Entry)]
 
-    @staticmethod
-    def _sanitize_bits(text: str, bit_count: int) -> str:
-        filtered = "".join(ch for ch in text if ch in {"0", "1"})
-        if len(filtered) >= bit_count:
-            return filtered[:bit_count]
-        return filtered + ("0" * (bit_count - len(filtered)))
-
-    @staticmethod
-    def _bit_index_tokens(bit_count: int, width: int = 2) -> list[str]:
-        if bit_count <= 0:
-            return []
-        token_width = max(1, width)
-        return [f"{idx:>{token_width}d}" for idx in range(bit_count - 1, -1, -1)]
+    _sanitize_bits = staticmethod(sanitize_bits)
+    _bit_index_tokens = staticmethod(bit_index_tokens)
+    _insert_at_end_with_left_shift = staticmethod(insert_at_end_with_left_shift)
 
     def _build_bit_index_guides(self, parent: tk.Widget, bit_count: int) -> list[tk.Canvas]:
-        if bit_count <= 0:
-            return []
-        canvases: list[tk.Canvas] = []
-        canvas = tk.Canvas(
-            parent,
-            bg="#ffffff",
-            bd=0,
-            highlightthickness=0,
-            height=BIT_INDEX_ROW_HEIGHT,
-        )
-        canvas.pack(side="top", fill="x", anchor="w")
-        canvases.append(canvas)
-        return canvases
+        return build_bit_index_guides(parent, bit_count)
 
     def _bind_bit_index_guides(
         self,
@@ -1172,36 +1264,7 @@ class FloatResultPanel(tk.LabelFrame):
         canvases: list[tk.Canvas],
         bit_count: int,
     ) -> None:
-        if bit_count <= 0 or not canvases:
-            return
-        tokens = self._bit_index_tokens(bit_count, width=2)
-        bit_font = tkfont.Font(font=BIT_FIELD_FONT)
-        min_width = max(1, bit_font.measure("0") * bit_count)
-        canvas = canvases[0]
-
-        def _render(_event: tk.Event | None = None) -> None:
-            width = max(entry.winfo_width(), min_width)
-            cell_width = width / bit_count
-            canvas.configure(width=width)
-            canvas.delete("all")
-            for col, token in enumerate(tokens):
-                x = (col + 0.5) * cell_width
-                canvas.create_text(
-                    x,
-                    BIT_INDEX_ROW_HEIGHT / 2,
-                    text=token,
-                    fill="#c0392b",
-                    font=BIT_INDEX_FONT,
-                )
-
-        entry.bind("<Configure>", _render, add=True)
-        entry.after_idle(_render)
-
-    @staticmethod
-    def _insert_at_end_with_left_shift(bits: str, incoming_bit: str) -> str:
-        if not bits:
-            return incoming_bit
-        return bits[1:] + incoming_bit
+        bind_bit_index_guides(entry, canvases, bit_count)
 
     def _set_bit_fields(self, sign_bits: str, exponent_bits: str, mantissa_bits: str) -> None:
         self._programmatic_bit_update = True
@@ -1302,3 +1365,828 @@ class FloatResultPanel(tk.LabelFrame):
         mantissa_bits = bit_text[mantissa_start:]
         self._set_bit_fields(sign_bits, exponent_bits, mantissa_bits)
         self._set_factor_text(sign_bits, exponent_bits, mantissa_bits, classification)
+
+
+WARP_OPS: tuple[str, ...] = ("AND", "OR", "XOR", "SHL", "SHR")
+WARP_LANES_PER_WARP = 32
+WARP_SQUARE_FONT = ("DejaVu Sans Mono", 10, "bold")
+WARP_LABEL_FONT = ("DejaVu Sans Mono", 11, "bold")
+WARP_UNUSED_BG = "#ededed"
+WARP_UNUSED_FG = "#b3b3b3"
+# One hue per index value, assigned in order (0=blue, 1=green, ...) and cycled.
+# threadIdx.y colors the thread squares themselves; threadIdx.z colors the
+# rectangle behind each warp column. Tk has no alpha channel, so
+# "transparency" is simulated by blending the hue toward the white backdrop.
+WARP_INDEX_HUES: tuple[str, ...] = (
+    "#3b82d6",  # 0: blue
+    "#3faf4f",  # 1: green
+    "#e0a626",  # 2: amber
+    "#9a4fc9",  # 3: violet
+    "#2ba8a8",  # 4: teal
+    "#d95555",  # 5: rose
+)
+WARP_SQUARE_ALPHA = 0.35  # squares: threadIdx.y hue over white
+WARP_COLUMN_ALPHA = 0.16  # column backdrop: threadIdx.z hue over white
+
+
+def blend_with_white(color: str, alpha: float) -> str:
+    """Simulate ``alpha`` opacity of ``color`` over a white backdrop."""
+    channels = (
+        round(int(color[i : i + 2], 16) * alpha + 255 * (1 - alpha))
+        for i in (1, 3, 5)
+    )
+    return "#{:02x}{:02x}{:02x}".format(*channels)
+
+
+def thread_square_color(thread_y: int) -> str:
+    """Thread square background: hue indexed by threadIdx.y (0=blue, 1=green, ...)."""
+    return blend_with_white(
+        WARP_INDEX_HUES[thread_y % len(WARP_INDEX_HUES)], WARP_SQUARE_ALPHA
+    )
+
+
+def warp_column_color(thread_z: int) -> str:
+    """Warp-column backdrop: hue indexed by threadIdx.z, extra translucent."""
+    return blend_with_white(
+        WARP_INDEX_HUES[thread_z % len(WARP_INDEX_HUES)], WARP_COLUMN_ALPHA
+    )
+
+
+class WarpCalculatorFrame(tk.Frame):
+    def __init__(self, parent: tk.Widget) -> None:
+        super().__init__(parent, bg="#f5f7fa")
+
+        self.width = 8
+        self._programmatic = False
+
+        self.a_var = tk.StringVar(value="0" * self.width)
+        self.b_var = tk.StringVar(value="0" * self.width)
+        self.op_var = tk.StringVar(value="AND")
+        self.result_bin_var = tk.StringVar()
+        self.result_hex_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Edit A/B, pick an op, or cycle width.")
+
+        self.blocks_var = tk.StringVar(value="2")
+        self.dim_x_var = tk.StringVar(value="32")
+        self.dim_y_var = tk.StringVar(value="2")
+        self.dim_z_var = tk.StringVar(value="1")
+        self.cuda_status_var = tk.StringVar(
+            value="Edit <<<blocks, (x, y, z)>>> to draw threads."
+        )
+
+        self.a_container: tk.Frame | None = None
+        self.b_container: tk.Frame | None = None
+        self.a_entry: tk.Entry | None = None
+        self.b_entry: tk.Entry | None = None
+        self.op_buttons: dict[str, tk.Button] = {}
+        self.width_button: tk.Button | None = None
+
+        self._grid_after_id: str | None = None
+        self._scroll_funcids: list[tuple[str, str]] = []
+        self._selected_square: tk.Label | None = None
+        self._selected_key: tuple[int, int] | None = None
+        self._selected_prev_bg = "#eaf2fb"
+        self._selected_prev_fg = "#173d66"
+        self.thread_info_text: tk.Text | None = None
+
+        self._build_ui()
+
+        self.a_var.trace_add("write", lambda *_: self._on_operand_change("a"))
+        self.b_var.trace_add("write", lambda *_: self._on_operand_change("b"))
+        self.blocks_var.trace_add("write", lambda *_: self._schedule_render_grid())
+        self.dim_x_var.trace_add("write", lambda *_: self._schedule_render_grid())
+        self.dim_y_var.trace_add("write", lambda *_: self._schedule_render_grid())
+        self.dim_z_var.trace_add("write", lambda *_: self._schedule_render_grid())
+
+        self._recompute()
+        self._schedule_render_grid()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+    def _build_ui(self) -> None:
+        calc = tk.LabelFrame(
+            self,
+            text="Binary Calculator",
+            font=PANEL_TITLE_FONT,
+            bg="#ffffff",
+            fg="#22313f",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=8,
+        )
+        calc.pack(fill="x", padx=12, pady=(12, 8))
+
+        self.a_container = self._build_operand_row(calc, "A", "a")
+        self.b_container = self._build_operand_row(calc, "B", "b")
+
+        op_row = tk.Frame(calc, bg="#ffffff")
+        op_row.pack(fill="x", pady=(8, 2))
+        tk.Label(
+            op_row,
+            text="Operation:",
+            width=10,
+            anchor="w",
+            bg="#ffffff",
+            fg="#34495e",
+            font=UI_FONT_BOLD,
+        ).pack(side="left")
+        for op in WARP_OPS:
+            button = tk.Button(
+                op_row,
+                text=op,
+                command=lambda selected=op: self._set_op(selected),
+                font=UI_FONT_BOLD,
+                padx=10,
+                pady=4,
+                bd=1,
+                relief="solid",
+                cursor="hand2",
+                takefocus=False,
+            )
+            button.pack(side="left", padx=(0, 6))
+            self.op_buttons[op] = button
+
+        self.width_button = tk.Button(
+            op_row,
+            text=f"Width: {warp_width_label(self.width)}",
+            command=self._cycle_width,
+            font=UI_FONT_BOLD,
+            padx=12,
+            pady=4,
+            bd=1,
+            relief="solid",
+            cursor="hand2",
+            takefocus=False,
+        )
+        self.width_button.pack(side="left", padx=(16, 0))
+
+        self._build_result_row(calc, "Result (bin):", self.result_bin_var)
+        self._build_result_row(calc, "Result (hex):", self.result_hex_var)
+
+        tk.Label(
+            calc,
+            textvariable=self.status_var,
+            bg="#ffffff",
+            fg="#3f5368",
+            anchor="w",
+            font=UI_FONT,
+        ).pack(fill="x", pady=(6, 0))
+
+        self._build_operand_editor("a")
+        self._build_operand_editor("b")
+        self._refresh_op_buttons()
+
+        self._build_cuda_section()
+
+    def _build_operand_row(self, parent: tk.Widget, label: str, which: str) -> tk.Frame:
+        row = tk.Frame(parent, bg="#ffffff")
+        row.pack(fill="x", pady=4)
+
+        tk.Label(
+            row,
+            text=label,
+            width=4,
+            anchor="w",
+            bg="#ffffff",
+            fg="#34495e",
+            font=UI_FONT_BOLD,
+        ).pack(side="left")
+
+        container = tk.Frame(row, bg="#ffffff")
+        container.pack(side="left", padx=(2, 0))
+
+        tk.Button(
+            row,
+            text="~",
+            command=lambda: self._invert_operand(which),
+            font=BIT_SEPARATOR_FONT,
+            padx=12,
+            pady=0,
+            bd=1,
+            relief="solid",
+            cursor="hand2",
+            takefocus=False,
+        ).pack(side="left", padx=(10, 0))
+        return container
+
+    def _build_operand_editor(self, which: str) -> None:
+        container = self.a_container if which == "a" else self.b_container
+        variable = self.a_var if which == "a" else self.b_var
+        if container is None:
+            return
+        for child in container.winfo_children():
+            child.destroy()
+
+        bit_count = self.width
+        entry = tk.Entry(
+            container,
+            textvariable=variable,
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#b8b8b8",
+            font=BIT_FIELD_FONT,
+            width=max(bit_count, 1),
+        )
+        entry.pack(side="top", anchor="w")
+        guides = build_bit_index_guides(container, bit_count)
+        bind_bit_index_guides(entry, guides, bit_count)
+        self._bind_operand_keys(entry, variable, bit_count)
+
+        if which == "a":
+            self.a_entry = entry
+        else:
+            self.b_entry = entry
+
+    def _bind_operand_keys(
+        self,
+        entry: tk.Entry,
+        variable: tk.StringVar,
+        bit_count: int,
+    ) -> None:
+        def _replace_bit(bit_index: int, replacement: str) -> None:
+            bits = sanitize_bits(variable.get(), bit_count)
+            bit_index = max(0, min(bit_index, bit_count - 1))
+            variable.set(bits[:bit_index] + replacement + bits[bit_index + 1 :])
+
+        def _zero_selection(first: int, last: int) -> None:
+            bits = sanitize_bits(variable.get(), bit_count)
+            variable.set(zero_bits_range(bits, first, last))
+            entry.selection_clear()
+            entry.icursor(first)
+
+        def _on_keypress(event: tk.Event) -> str | None:
+            if event.keysym in {"Tab", "ISO_Left_Tab", "Left", "Right", "Home", "End", "Prior", "Next"}:
+                return None
+
+            selection = entry_selection_bounds(entry)
+
+            # Keep clipboard shortcuts working, but Cut must preserve fixed width:
+            # copy the selection ourselves and zero it instead of deleting chars.
+            if event.state & 0x4:
+                if event.keysym.lower() == "x" and selection is not None:
+                    first, last = selection
+                    bits = sanitize_bits(variable.get(), bit_count)
+                    entry.clipboard_clear()
+                    entry.clipboard_append(bits[first:last])
+                    _zero_selection(first, last)
+                    return "break"
+                return None
+
+            if event.keysym in {"BackSpace", "Delete"} and selection is not None:
+                _zero_selection(*selection)
+                return "break"
+
+            cursor = entry.index(tk.INSERT)
+            if event.char in {"0", "1"}:
+                if cursor >= bit_count:
+                    bits = sanitize_bits(variable.get(), bit_count)
+                    variable.set(insert_at_end_with_left_shift(bits, event.char))
+                    entry.icursor(bit_count)
+                    return "break"
+                _replace_bit(cursor, event.char)
+                entry.icursor(min(cursor + 1, bit_count))
+                return "break"
+
+            if event.keysym == "BackSpace":
+                target = max(cursor - 1, 0)
+                _replace_bit(target, "0")
+                entry.icursor(target)
+                return "break"
+
+            if event.keysym == "Delete":
+                target = min(cursor, bit_count - 1)
+                _replace_bit(target, "0")
+                entry.icursor(target)
+                return "break"
+
+            return "break"
+
+        entry.bind("<KeyPress>", _on_keypress, add=True)
+
+    def _build_result_row(
+        self,
+        parent: tk.Widget,
+        label: str,
+        variable: tk.StringVar,
+    ) -> tk.Entry:
+        row = tk.Frame(parent, bg="#ffffff")
+        row.pack(fill="x", pady=1)
+        tk.Label(
+            row,
+            text=label,
+            width=12,
+            anchor="w",
+            bg="#ffffff",
+            fg="#34495e",
+            font=UI_FONT_BOLD,
+        ).pack(side="left")
+        value_entry = _make_copyable_entry(row, variable, bg="#ffffff", takefocus=False)
+        value_entry.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        return value_entry
+
+    def _build_cuda_section(self) -> None:
+        cuda = tk.LabelFrame(
+            self,
+            text="CUDA Block / Warp / Thread Layout",
+            font=PANEL_TITLE_FONT,
+            bg="#ffffff",
+            fg="#22313f",
+            bd=1,
+            relief="solid",
+            padx=10,
+            pady=8,
+        )
+        cuda.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        config_row = tk.Frame(cuda, bg="#ffffff")
+        config_row.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            config_row,
+            text="Launch config:",
+            bg="#ffffff",
+            fg="#34495e",
+            font=UI_FONT_BOLD,
+        ).pack(side="left")
+        tk.Label(
+            config_row, text="<<<", bg="#ffffff", fg="#22313f", font=ENTRY_FONT
+        ).pack(side="left", padx=(8, 2))
+        tk.Entry(
+            config_row,
+            textvariable=self.blocks_var,
+            width=6,
+            font=ENTRY_FONT,
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#b8b8b8",
+            justify="center",
+        ).pack(side="left")
+        tk.Label(
+            config_row, text=", (", bg="#ffffff", fg="#22313f", font=ENTRY_FONT
+        ).pack(side="left", padx=2)
+        for index, dim_var in enumerate((self.dim_x_var, self.dim_y_var, self.dim_z_var)):
+            if index:
+                tk.Label(
+                    config_row, text=",", bg="#ffffff", fg="#22313f", font=ENTRY_FONT
+                ).pack(side="left", padx=2)
+            tk.Entry(
+                config_row,
+                textvariable=dim_var,
+                width=5,
+                font=ENTRY_FONT,
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#b8b8b8",
+                justify="center",
+            ).pack(side="left")
+        tk.Label(
+            config_row, text=")>>>", bg="#ffffff", fg="#22313f", font=ENTRY_FONT
+        ).pack(side="left", padx=(2, 0))
+
+        cuda_body = tk.Frame(cuda, bg="#ffffff")
+        cuda_body.pack(fill="both", expand=True)
+        cuda_body.columnconfigure(0, weight=1, uniform="cuda")
+        cuda_body.columnconfigure(1, weight=1, uniform="cuda")
+        cuda_body.rowconfigure(0, weight=1)
+
+        canvas_wrap = tk.Frame(cuda_body, bg="#ffffff")
+        canvas_wrap.grid(row=0, column=0, sticky="nsew")
+
+        self.grid_canvas = tk.Canvas(
+            canvas_wrap,
+            bg="#ffffff",
+            bd=0,
+            highlightthickness=0,
+        )
+        vscroll = ttk.Scrollbar(
+            canvas_wrap, orient="vertical", command=self.grid_canvas.yview
+        )
+        self.grid_canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side="right", fill="y")
+        self.grid_canvas.pack(side="left", fill="both", expand=True)
+
+        self.grid_inner = tk.Frame(self.grid_canvas, bg="#ffffff")
+        self.grid_window = self.grid_canvas.create_window(
+            (0, 0), window=self.grid_inner, anchor="nw"
+        )
+        self.grid_inner.bind(
+            "<Configure>",
+            lambda _e: self.grid_canvas.configure(
+                scrollregion=self.grid_canvas.bbox("all")
+            ),
+        )
+        self.grid_canvas.bind(
+            "<Configure>",
+            lambda e: self.grid_canvas.itemconfigure(self.grid_window, width=e.width),
+        )
+        self._bind_grid_scrolling()
+
+        info_wrap = tk.LabelFrame(
+            cuda_body,
+            text="Thread info",
+            font=UI_FONT_BOLD,
+            bg="#ffffff",
+            fg="#22313f",
+            bd=1,
+            relief="solid",
+            padx=6,
+            pady=4,
+        )
+        info_wrap.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self.thread_info_text = tk.Text(
+            info_wrap,
+            bg="#fffdeb",
+            fg="#1f2d3d",
+            relief="solid",
+            bd=1,
+            padx=8,
+            pady=6,
+            font=TOOLTIP_FONT,
+            wrap="none",
+            height=10,
+            takefocus=False,
+        )
+        self.thread_info_text.pack(fill="both", expand=True)
+        self._set_thread_info_text(self._thread_info_text(None))
+
+        tk.Label(
+            cuda,
+            textvariable=self.cuda_status_var,
+            bg="#ffffff",
+            fg="#3f5368",
+            anchor="w",
+            font=UI_FONT,
+        ).pack(fill="x", pady=(6, 0))
+
+    # ------------------------------------------------------------------
+    # Binary calculator behavior
+    # ------------------------------------------------------------------
+    def _on_operand_change(self, which: str) -> None:
+        if self._programmatic:
+            return
+        variable = self.a_var if which == "a" else self.b_var
+        clean = sanitize_bits(variable.get(), self.width)
+        if clean != variable.get():
+            self._programmatic = True
+            variable.set(clean)
+            self._programmatic = False
+        self._recompute()
+
+    def _invert_operand(self, which: str) -> None:
+        variable = self.a_var if which == "a" else self.b_var
+        bits = sanitize_bits(variable.get(), self.width)
+        variable.set(bits_invert(bits))
+
+    def _set_op(self, op: str) -> None:
+        self.op_var.set(op)
+        self._refresh_op_buttons()
+        self._recompute()
+
+    def _refresh_op_buttons(self) -> None:
+        active = self.op_var.get()
+        for op, button in self.op_buttons.items():
+            if op == active:
+                button.configure(relief="sunken", bg="#d6e6fb", fg="#173d66")
+            else:
+                button.configure(relief="solid", bg="#f0f0f0", fg="#22313f")
+
+    def _cycle_width(self) -> None:
+        mask_old = (1 << self.width) - 1
+        a_val = int(sanitize_bits(self.a_var.get(), self.width), 2) & mask_old
+        b_val = int(sanitize_bits(self.b_var.get(), self.width), 2) & mask_old
+
+        index = WARP_WIDTHS.index(self.width) if self.width in WARP_WIDTHS else -1
+        self.width = WARP_WIDTHS[(index + 1) % len(WARP_WIDTHS)]
+
+        mask_new = (1 << self.width) - 1
+        a_val &= mask_new
+        b_val &= mask_new
+
+        self._programmatic = True
+        self.a_var.set(format(a_val, f"0{self.width}b"))
+        self.b_var.set(format(b_val, f"0{self.width}b"))
+        self._programmatic = False
+
+        self._build_operand_editor("a")
+        self._build_operand_editor("b")
+        if self.width_button is not None:
+            self.width_button.configure(text=f"Width: {warp_width_label(self.width)}")
+        self._recompute()
+
+    def _recompute(self) -> None:
+        width = self.width
+        op = self.op_var.get()
+        a_val = int(sanitize_bits(self.a_var.get(), width), 2)
+        b_val = int(sanitize_bits(self.b_var.get(), width), 2)
+
+        result, dropped = warp_apply_op(a_val, b_val, op, width)
+        self.result_bin_var.set(format(result, f"0{width}b"))
+        hex_digits = (width + 3) // 4
+        self.result_hex_var.set("0x" + format(result, f"0{hex_digits}X"))
+
+        note = ""
+        if op in {"SHL", "SHR"}:
+            shift = b_val & ((1 << width) - 1)
+            if shift >= width:
+                note = f" (shift {shift} >= width {width}, result 0)"
+        if op == "SHL" and dropped:
+            self.status_var.set(f"SHL dropped set bits beyond width {width}.{note}")
+        else:
+            self.status_var.set(f"{op} result updated.{note}")
+
+    def focus_primary_input(self) -> None:
+        if self.a_entry is not None:
+            self.a_entry.focus_set()
+            self.a_entry.icursor(tk.END)
+
+    # ------------------------------------------------------------------
+    # CUDA visualizer behavior
+    # ------------------------------------------------------------------
+    def _bind_grid_scrolling(self) -> None:
+        """Scroll the CUDA grid with the mouse wheel (pointer over the grid)
+        and PageUp/PageDown (warp tab visible).
+
+        Bound on the toplevel because the thread squares sit over the canvas
+        and would swallow wheel events; funcids are unbound in ``destroy``.
+        """
+        root = self.winfo_toplevel()
+
+        def _pointer_over_grid(event: tk.Event) -> bool:
+            try:
+                if not self.grid_canvas.winfo_ismapped():
+                    return False
+                x0 = self.grid_canvas.winfo_rootx()
+                y0 = self.grid_canvas.winfo_rooty()
+                return (
+                    x0 <= event.x_root < x0 + self.grid_canvas.winfo_width()
+                    and y0 <= event.y_root < y0 + self.grid_canvas.winfo_height()
+                )
+            except tk.TclError:
+                return False
+
+        def _on_wheel(event: tk.Event) -> str | None:
+            if not _pointer_over_grid(event):
+                return None
+            up = getattr(event, "num", 0) == 4 or getattr(event, "delta", 0) > 0
+            self.grid_canvas.yview_scroll(-3 if up else 3, "units")
+            return "break"
+
+        def _on_page(event: tk.Event, direction: int) -> str | None:
+            try:
+                if not self.grid_canvas.winfo_ismapped():
+                    return None
+            except tk.TclError:
+                return None
+            self.grid_canvas.yview_scroll(direction, "pages")
+            return "break"
+
+        bindings = (
+            ("<Button-4>", _on_wheel),  # X11 wheel up
+            ("<Button-5>", _on_wheel),  # X11 wheel down
+            ("<MouseWheel>", _on_wheel),  # Windows/macOS
+            ("<Prior>", lambda e: _on_page(e, -1)),
+            ("<Next>", lambda e: _on_page(e, 1)),
+        )
+        for sequence, handler in bindings:
+            funcid = root.bind(sequence, handler, add=True)
+            self._scroll_funcids.append((sequence, funcid))
+
+    def _schedule_render_grid(self) -> None:
+        if self._grid_after_id is not None:
+            try:
+                self.after_cancel(self._grid_after_id)
+            except tk.TclError:
+                pass
+        self._grid_after_id = self.after_idle(self._render_grid)
+
+    def _render_grid(self) -> None:
+        self._grid_after_id = None
+        self._clear_thread_selection()
+        for child in self.grid_inner.winfo_children():
+            child.destroy()
+
+        try:
+            blocks = int((self.blocks_var.get() or "0").strip() or "0")
+            dims = tuple(
+                int((var.get() or "0").strip() or "0")
+                for var in (self.dim_x_var, self.dim_y_var, self.dim_z_var)
+            )
+        except ValueError:
+            self.cuda_status_var.set(
+                "Launch config must be integers, e.g. <<<2, (32, 2, 1)>>>."
+            )
+            return
+
+        if blocks < 0 or any(dim < 0 for dim in dims):
+            self.cuda_status_var.set("Launch config values must be non-negative.")
+            return
+
+        block_size = dims[0] * dims[1] * dims[2]
+        if block_size > 1024:
+            self.cuda_status_var.set(
+                f"blockDim {dims} has {block_size} threads; CUDA allows at most "
+                "1024 per block. Nothing drawn."
+            )
+            return
+
+        if blocks == 0 or block_size == 0:
+            self.cuda_status_var.set("Nothing to draw (blocks or a block dim is 0).")
+            return
+
+        # Row-per-warp layout: each (y, z) row of blockDim.x threads occupies
+        # its own warp(s); when blockDim.x is not a multiple of 32 the leftover
+        # lanes of each row's last warp are drawn grayed out (unused).
+        warps_per_row = (dims[0] + WARP_LANES_PER_WARP - 1) // WARP_LANES_PER_WARP
+        num_warps = warps_per_row * dims[1] * dims[2]
+        lanes_per_block = num_warps * WARP_LANES_PER_WARP
+
+        messages: list[str] = []
+        if blocks > 32:
+            blocks = 32
+            messages.append("blocks capped at 32")
+        if lanes_per_block > 4096:
+            self.cuda_status_var.set(
+                f"blockDim {dims} needs {num_warps} warps = {lanes_per_block} "
+                "lanes per block (> 4096 drawable). Nothing drawn."
+            )
+            return
+        if blocks * lanes_per_block > 4096:
+            blocks = 4096 // lanes_per_block
+            messages.append("total drawn lanes capped at 4096")
+
+        for block_idx in range(blocks):
+            block_frame = tk.Frame(self.grid_inner, bg="#ffffff")
+            block_frame.pack(anchor="w", fill="x", pady=(6, 2))
+            tk.Label(
+                block_frame,
+                text=f"Block {block_idx}",
+                bg="#ffffff",
+                fg="#22313f",
+                font=UI_FONT_BOLD,
+            ).pack(anchor="w")
+
+            warps_row = tk.Frame(block_frame, bg="#ffffff")
+            warps_row.pack(anchor="w")
+            for warp_idx in range(num_warps):
+                row = warp_idx // warps_per_row
+                row_sub = warp_idx % warps_per_row
+                thread_y = row % dims[1]
+                thread_z = row // dims[1]
+
+                # Translucent-looking rectangle behind the whole column,
+                # colored by threadIdx.z.
+                column_bg = warp_column_color(thread_z)
+                warp_col = tk.Frame(warps_row, bg=column_bg)
+                warp_col.pack(side="left", anchor="n", padx=(0, 6))
+                tk.Label(
+                    warp_col,
+                    text=f"w{warp_idx}",
+                    anchor="center",
+                    bg=column_bg,
+                    fg="#5d6d7e",
+                    font=WARP_LABEL_FONT,
+                ).pack(padx=3, pady=(2, 0))
+
+                for lane in range(WARP_LANES_PER_WARP):
+                    thread_x = row_sub * WARP_LANES_PER_WARP + lane
+                    if thread_x >= dims[0]:
+                        # Lanes past blockDim.x in this row's warp are unused.
+                        tk.Label(
+                            warp_col,
+                            text=f"{lane}",
+                            width=2,
+                            bg=WARP_UNUSED_BG,
+                            fg=WARP_UNUSED_FG,
+                            relief="solid",
+                            bd=1,
+                            font=WARP_SQUARE_FONT,
+                        ).pack(padx=3, pady=1)
+                        continue
+                    linear_tid = (
+                        thread_x
+                        + thread_y * dims[0]
+                        + thread_z * dims[0] * dims[1]
+                    )
+                    square = tk.Label(
+                        warp_col,
+                        text=f"{lane}",
+                        width=2,
+                        bg=thread_square_color(thread_y),
+                        fg="#173d66",
+                        relief="solid",
+                        bd=1,
+                        cursor="hand2",
+                        font=WARP_SQUARE_FONT,
+                    )
+                    square.bind(
+                        "<Button-1>",
+                        lambda _event, sq=square, bi=block_idx, bd=dims, tid=linear_tid: self._on_thread_click(
+                            sq, bi, bd, tid
+                        ),
+                    )
+                    square.pack(padx=3, pady=1)
+
+        unused_per_block = lanes_per_block - block_size
+        summary = (
+            f"Drew {blocks} block(s) x {block_size} active thread(s) "
+            f"(blockDim = {dims[0]}, {dims[1]}, {dims[2]}; {num_warps} warp(s)/block, "
+            f"{lanes_per_block} lanes, {unused_per_block} unused)."
+        )
+        if messages:
+            summary += " " + "; ".join(messages) + "."
+        self.cuda_status_var.set(summary)
+
+    def _thread_info_text(
+        self, selection: tuple[int, int, tuple[int, int, int]] | None
+    ) -> str:
+        formula = (
+            "global = blockIdx.x*blockDim.x*blockDim.y*blockDim.z\n"
+            "       + threadIdx.z*blockDim.x*blockDim.y\n"
+            "       + threadIdx.y*blockDim.x\n"
+            "       + threadIdx.x\n"
+        )
+        if selection is None:
+            return (
+                "blockIdx.x = -\n"
+                "threadIdx.x = -\n"
+                "threadIdx.y = -\n"
+                "threadIdx.z = -\n"
+                f"{formula}"
+                "       = -"
+            )
+        block_idx, linear_tid, block_dim = selection
+        info = cuda_thread_info(block_idx, linear_tid, block_dim)
+        dim_x, dim_y, dim_z = block_dim
+        return (
+            f"blockIdx.x = {info['blockIdx.x']}\n"
+            f"threadIdx.x = {info['threadIdx.x']}\n"
+            f"threadIdx.y = {info['threadIdx.y']}\n"
+            f"threadIdx.z = {info['threadIdx.z']}\n"
+            f"{formula}"
+            f"       = {info['blockIdx.x']}*{dim_x}*{dim_y}*{dim_z} "
+            f"+ {info['threadIdx.z']}*{dim_x}*{dim_y} "
+            f"+ {info['threadIdx.y']}*{dim_x} "
+            f"+ {info['threadIdx.x']} = {info['global']}"
+        )
+
+    def _set_thread_info_text(self, text: str) -> None:
+        if self.thread_info_text is None:
+            return
+        self.thread_info_text.configure(state="normal")
+        self.thread_info_text.delete("1.0", tk.END)
+        self.thread_info_text.insert("1.0", text)
+        self.thread_info_text.configure(state="disabled")
+
+    def _clear_thread_selection(self) -> None:
+        if self._selected_square is not None:
+            try:
+                self._selected_square.configure(
+                    bg=self._selected_prev_bg, fg=self._selected_prev_fg
+                )
+            except tk.TclError:
+                pass
+        self._selected_square = None
+        self._selected_key = None
+        self._set_thread_info_text(self._thread_info_text(None))
+
+    def _on_thread_click(
+        self,
+        square: tk.Label,
+        block_idx: int,
+        block_dim: tuple[int, int, int],
+        linear_tid: int,
+    ) -> None:
+        key = (block_idx, linear_tid)
+        if self._selected_key == key:
+            self._clear_thread_selection()
+            return
+
+        self._clear_thread_selection()
+        self._selected_prev_bg = str(square.cget("bg"))
+        self._selected_prev_fg = str(square.cget("fg"))
+        square.configure(bg="#f7d774", fg="#4a3803")
+        self._selected_square = square
+        self._selected_key = key
+        self._set_thread_info_text(
+            self._thread_info_text((block_idx, linear_tid, block_dim))
+        )
+
+    def destroy(self) -> None:
+        if self._grid_after_id is not None:
+            try:
+                self.after_cancel(self._grid_after_id)
+            except tk.TclError:
+                pass
+            self._grid_after_id = None
+        root = self.winfo_toplevel()
+        for sequence, funcid in self._scroll_funcids:
+            try:
+                root.unbind(sequence, funcid)
+            except tk.TclError:
+                pass
+        self._scroll_funcids = []
+        super().destroy()

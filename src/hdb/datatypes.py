@@ -421,3 +421,95 @@ def build_all_float_panel_display_data(
     for name in ("half", "single", "double"):
         results[name] = build_float_panel_display_data(input_value, FLOAT_TYPE_SPECS[name])
     return results
+
+
+# ---------------------------------------------------------------------------
+# Warp calculator helpers (pure integer/inspection logic, no Tk).
+# ---------------------------------------------------------------------------
+
+WARP_WIDTHS: tuple[int, ...] = (4, 5, 8, 16, 32)
+
+WARP_WIDTH_LABELS: dict[int, str] = {
+    width: ("WARP(5)" if width == 5 else str(width)) for width in WARP_WIDTHS
+}
+
+
+def warp_width_label(width: int) -> str:
+    """Display label for a warp-calculator bit width (``5`` shows as ``WARP(5)``)."""
+    return WARP_WIDTH_LABELS.get(width, str(width))
+
+
+def warp_apply_op(a: int, b: int, op: str, width: int) -> tuple[int, bool]:
+    """Apply a fixed-width bitwise/shift operation.
+
+    Operands are masked to ``width`` bits first. Returns ``(result, dropped)``
+    where ``dropped`` is only meaningful for ``SHL`` (set bits pushed out of the
+    width window).
+    """
+    mask = (1 << width) - 1
+    a_masked = a & mask
+    b_masked = b & mask
+
+    if op in {"AND", "OR", "XOR"}:
+        if op == "AND":
+            result = a_masked & b_masked
+        elif op == "OR":
+            result = a_masked | b_masked
+        else:
+            result = a_masked ^ b_masked
+        return result & mask, False
+
+    if op == "SHL":
+        shift = b_masked
+        if shift >= width:
+            return 0, a_masked != 0
+        dropped = (a_masked << shift) >> width != 0
+        return (a_masked << shift) & mask, dropped
+
+    if op == "SHR":
+        shift = b_masked
+        if shift >= width:
+            return 0, False
+        return a_masked >> shift, False
+
+    raise ValueError(f"Unknown warp op: {op!r}")
+
+
+def bits_invert(bits: str) -> str:
+    """C-style ``~``: flip every ``0``/``1`` char, preserving length."""
+    flipped: list[str] = []
+    for ch in bits:
+        if ch == "0":
+            flipped.append("1")
+        elif ch == "1":
+            flipped.append("0")
+        else:
+            raise ValueError(f"Non-binary character in bits: {ch!r}")
+    return "".join(flipped)
+
+
+def cuda_thread_info(
+    block_idx: int, linear_tid: int, block_dim: tuple[int, int, int]
+) -> dict[str, int]:
+    """Per-thread CUDA indices for a 1D grid of 3D blocks.
+
+    ``linear_tid`` is the thread's linear index within its block, decomposed
+    using CUDA's linearization order (x fastest, then y, then z):
+    ``linear = x + y*dim_x + z*dim_x*dim_y``.
+    """
+    dim_x, dim_y, dim_z = block_dim
+    if dim_x <= 0 or dim_y <= 0 or dim_z <= 0:
+        raise ValueError(f"Block dimensions must be positive: {block_dim!r}")
+    block_size = dim_x * dim_y * dim_z
+    if not 0 <= linear_tid < block_size:
+        raise ValueError(f"linear_tid {linear_tid} out of range for {block_dim!r}")
+    return {
+        "blockIdx.x": block_idx,
+        "threadIdx.x": linear_tid % dim_x,
+        "threadIdx.y": (linear_tid // dim_x) % dim_y,
+        "threadIdx.z": linear_tid // (dim_x * dim_y),
+        "blockDim.x": dim_x,
+        "blockDim.y": dim_y,
+        "blockDim.z": dim_z,
+        "global": block_idx * block_size + linear_tid,
+    }
