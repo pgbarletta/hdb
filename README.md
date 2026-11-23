@@ -1,7 +1,8 @@
 # hdb
 
-`hdb` is a Tkinter desktop tool with four synchronized calculator/visualizer tabs:
+`hdb` is a Tkinter desktop tool with five tabs:
 
+- `LaTeX`: Paste a LaTeX equation, see it rendered, and copy it to the clipboard as a PNG image (small/medium/large)
 - `Base Converter`: Binary (base 2), Decimal (base 10), Hexadecimal (base 16)
 - `Warp Calculator`: Fixed-width bitwise operations and CUDA launch thread visualizer
 - `Integer Visualizer`: C++ integer bit-layout and wrap behavior
@@ -18,6 +19,15 @@ UI layout notes:
 pip install .
 ```
 
+### LaTeX tab requirements
+
+The `LaTeX` tab shells out to external tools (the other tabs do not need them):
+
+- `latex` and `dvipng` (a TeX distribution such as TeX Live; `amsmath`, `amssymb`, `bm` and `preview` packages)
+- a clipboard tool for image copy: `wl-copy` (wl-clipboard, used on Wayland) or `xclip` (X11)
+
+If something is missing the tab shows an actionable message instead of failing.
+
 ## Run
 
 ```bash
@@ -32,13 +42,15 @@ python -m hdb
 
 ## Keyboard shortcuts
 
-- `Ctrl+1`: switch to `Base Converter`
-- `Ctrl+2`: switch to `Warp Calculator`
-- `Ctrl+3`: switch to `Integer Visualizer`
-- `Ctrl+4`: switch to `Float Visualizer`
+- `Ctrl+1`: switch to `LaTeX`
+- `Ctrl+2`: switch to `Base Converter`
+- `Ctrl+3`: switch to `Warp Calculator`
+- `Ctrl+4`: switch to `Integer Visualizer`
+- `Ctrl+5`: switch to `Float Visualizer`
 - `Ctrl+A`: select all text in any text input (Entry, Spinbox, Combobox, Text widgets)
 - `Ctrl+Tab` / `Ctrl+Shift+Tab`: cycle to the next / previous tab (wraps around), always — even when the cursor is inside a text box
 - `Tab` / `Shift+Tab`:
+  - on `LaTeX`: default widget behavior (`Tab` inserts a tab character in the equation box)
   - on `Base Converter`: cycle base text boxes
   - on `Warp Calculator`: default widget tab behavior
   - on `Float Visualizer`: cycle editable float text boxes (decimal + sign/exponent/mantissa) without auto-selecting text
@@ -48,6 +60,19 @@ python -m hdb
 - `Ctrl+Z` / `Ctrl+Shift+Z` in a base-converter textbox: undo / redo
 - `Esc`: always quit (works even when focus is inside a textbox)
 - `Ctrl+C` in the launching terminal (SIGINT): quits promptly, even when the window is idle
+
+## LaTeX tab behavior
+
+- The `LaTeX` tab is the first tab and the one shown at startup; focus starts in the equation box.
+- Paste an equation into the text box; it is rendered automatically (about 0.35 s after you stop typing) using the system `latex` + `dvipng`, so full TeX math works (`\boxed`, `\mathbf`, `amsmath` environments, ...).
+- Accepted input: bare math, or math wrapped in `\[ ... \]`, `$$ ... $$`, `$ ... $` or `\( ... \)`. Input starting with a `\begin{...}` environment (e.g. `align*`) or containing its own `$...$` text/math is passed to LaTeX as-is. Math containing `\\` or `&` is laid out with `gathered`/`aligned`.
+- The preview is cropped tightly around the equation and shrinks to fit the window. The PNG has a white background by default.
+- The `Transparent background` checkbox makes the PNG background transparent (alpha) instead of white; the preview then sits on a gray backdrop so the transparency is visible. Toggling it re-rasterises from the cached LaTeX (no recompile). Note that some apps show transparent areas as black.
+- `Image size` selects the PNG resolution: `Small` (150 dpi), `Medium` (300 dpi, default), `Large` (600 dpi). The exact output pixel size is shown above the preview. Changing size re-rasterises without recompiling the LaTeX.
+- `Copy image to clipboard` puts the PNG (at the selected size) on the system clipboard as `image/png` via `wl-copy` (Wayland) or `xclip` (X11). The button is disabled while a render is pending or when the source is blank/invalid, so it can never copy a stale image.
+- LaTeX errors are shown in red in the status line (e.g. `Undefined control sequence. (l.8 \foo)`).
+- `Clear` empties the equation box.
+- Rendering runs on a worker thread; stale results are dropped. LaTeX runs with shell escape disabled and file access restricted to its temp directory.
 
 ## Base converter behavior
 

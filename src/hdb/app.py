@@ -7,6 +7,7 @@ import tkinter.font as tkfont
 from dataclasses import dataclass
 from tkinter import ttk
 
+from .latex_tab import LatexFrame
 from .visualizer import (
     FloatVisualizerFrame,
     IntegerVisualizerFrame,
@@ -21,6 +22,10 @@ COLUMN_DIGIT_FONT = ("DejaVu Sans Mono", 18, "bold")
 COLUMN_POWER_FONT = ("DejaVu Sans Mono", 10)
 COLUMN_DIGIT_FONT_WIDE = ("DejaVu Sans Mono", 19, "bold")
 COLUMN_POWER_FONT_WIDE = ("DejaVu Sans Mono", 12)
+
+# Notebook tab positions (LaTeX is first, ahead of Base Converter).
+LATEX_TAB_INDEX = 0
+BASE_TAB_INDEX = 1
 
 BASES = {
     "bin": 2,
@@ -254,15 +259,20 @@ class BaseConverterApp(tk.Tk):
         self.notebook = ttk.Notebook(root, style="Hdb.TNotebook")
         self.notebook.pack(fill="both", expand=True)
 
+        latex_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         converter_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         warp_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         integer_tab = tk.Frame(self.notebook, bg="#f5f7fa")
         float_tab = tk.Frame(self.notebook, bg="#f5f7fa")
 
+        self.notebook.add(latex_tab, text="LaTeX")
         self.notebook.add(converter_tab, text="Base Converter")
         self.notebook.add(warp_tab, text="Warp Calculator")
         self.notebook.add(integer_tab, text="Integer Visualizer")
         self.notebook.add(float_tab, text="Float Visualizer")
+
+        self.latex_frame = LatexFrame(latex_tab)
+        self.latex_frame.pack(fill="both", expand=True)
 
         self._build_converter_tab(converter_tab)
 
@@ -384,6 +394,7 @@ class BaseConverterApp(tk.Tk):
         self.bind_all("<Control-Key-2>", self._on_ctrl_2_tab, add=True)
         self.bind_all("<Control-Key-3>", self._on_ctrl_3_tab, add=True)
         self.bind_all("<Control-Key-4>", self._on_ctrl_4_tab, add=True)
+        self.bind_all("<Control-Key-5>", self._on_ctrl_5_tab, add=True)
         self._bind_escape_on_inputs()
         self._bind_select_all_shortcut()
 
@@ -601,16 +612,19 @@ class BaseConverterApp(tk.Tk):
 
     def _select_tab(self, index: int) -> None:
         self.notebook.select(index)
-        if index == 0:
+        if index == LATEX_TAB_INDEX:
+            self.latex_frame.focus_primary_input()
+            return
+        if index == BASE_TAB_INDEX:
             self._focus_binary_entry()
             return
-        if index == 1:
+        if index == 2:
             self.warp_calculator.focus_primary_input()
             return
-        if index == 2:
+        if index == 3:
             self.integer_visualizer.focus_primary_input()
             return
-        if index == 3:
+        if index == 4:
             self.float_visualizer.focus_primary_input()
 
     def _on_ctrl_1_tab(self, _event: tk.Event) -> str:
@@ -629,6 +643,10 @@ class BaseConverterApp(tk.Tk):
         self._select_tab(3)
         return "break"
 
+    def _on_ctrl_5_tab(self, _event: tk.Event) -> str:
+        self._select_tab(4)
+        return "break"
+
     def _on_ctrl_tab_next(self, _event: tk.Event) -> str:
         count = self.notebook.index("end")
         self._select_tab((self._current_tab_index() + 1) % count)
@@ -643,7 +661,7 @@ class BaseConverterApp(tk.Tk):
         if event.state & 0x4:  # Ctrl+Tab cycles notebook tabs, not entries
             return None
         tab_index = self._current_tab_index()
-        if tab_index == 0:
+        if tab_index == BASE_TAB_INDEX:
             return self._cycle_entry_focus(reverse=False, widget=event.widget)
         return None
 
@@ -651,7 +669,7 @@ class BaseConverterApp(tk.Tk):
         if event.state & 0x4:
             return None
         tab_index = self._current_tab_index()
-        if tab_index == 0:
+        if tab_index == BASE_TAB_INDEX:
             return self._cycle_entry_focus(reverse=True, widget=event.widget)
         return None
 
